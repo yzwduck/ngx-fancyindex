@@ -48,6 +48,9 @@ static const char *long_month[] = {
     "August", "September", "October", "November", "December",
 };
 
+#define CRLF "\r\n"
+#define TAB "\t"
+
 
 #define DATETIME_FORMATS(F_, t) \
     F_ ('a',  3, "%3s",  short_weekday[((t)->ngx_tm_wday + 6) % 7]) \
@@ -413,14 +416,14 @@ ngx_fancyindex_escape_uri(u_char *dst, u_char *src, size_t size)
     }
 
     if (dst == NULL) {
-        return escapes + ngx_escape_uri(NULL, src, size, NGX_ESCAPE_HTML);
+        return escapes + ngx_escape_uri(NULL, src, size, NGX_ESCAPE_URI_COMPONENT);
     }
     else if (escapes == 0) {
         /* No need to do extra escaping, avoid the temporary buffer */
-        return ngx_escape_uri(dst, src, size, NGX_ESCAPE_HTML);
+        return ngx_escape_uri(dst, src, size, NGX_ESCAPE_URI_COMPONENT);
     }
     else {
-        uintptr_t uescapes = ngx_escape_uri(NULL, src, size, NGX_ESCAPE_HTML);
+        uintptr_t uescapes = ngx_escape_uri(NULL, src, size, NGX_ESCAPE_URI_COMPONENT);
         size_t bufsz = size + 2 * uescapes;
 
         /*
@@ -434,7 +437,7 @@ ngx_fancyindex_escape_uri(u_char *dst, u_char *src, size_t size)
         u_char *buf = (u_char*) malloc(sizeof(u_char) * bufsz);
 #endif /* __GNUC__ || __clang__ */
 
-        ngx_escape_uri(buf, src, size, NGX_ESCAPE_HTML);
+        ngx_escape_uri(buf, src, size, NGX_ESCAPE_URI_COMPONENT);
 
         while (bufsz--) {
             switch (*buf) {
@@ -738,18 +741,31 @@ make_content_buf(
          *     <td>size</td><td>date</td>
          *   </tr>
          */
-        len += ngx_sizeof_ssz("<tr><td><a href=\"")
+        // len += ngx_sizeof_ssz("<tr><td class=\"name\"><a href=\"")
+        //     + entry[i].name.len + entry[i].escape /* Escaped URL */
+        //     + ngx_sizeof_ssz("?C=x&amp;O=y") /* URL sorting arguments */
+        //     + ngx_sizeof_ssz("\">")
+        //     + entry[i].name.len + entry[i].utf_len
+        //     + alcf->name_length + ngx_sizeof_ssz("&gt;")
+        //     + ngx_sizeof_ssz("</a></td><td class=\"size\">")
+        //     + 22 /* File size */
+        //     + ngx_sizeof_ssz("</td><td class=\"date\">")    /* Date prefix */
+        //     + ngx_sizeof_ssz("</td></tr>\n") /* Date suffix */
+        //     + 2 /* CR LF */
+        //     ;
+          len += ngx_sizeof_ssz("<tr>" CRLF )
+            + ngx_sizeof_ssz(TAB "<td class=\"name\"><a href=\"")
             + entry[i].name.len + entry[i].escape /* Escaped URL */
             + ngx_sizeof_ssz("?C=x&amp;O=y") /* URL sorting arguments */
             + ngx_sizeof_ssz("\">")
             + entry[i].name.len + entry[i].utf_len
             + alcf->name_length + ngx_sizeof_ssz("&gt;")
-            + ngx_sizeof_ssz("</a></td><td>")
-            + 20 /* File size */
-            + ngx_sizeof_ssz("</td><td>")    /* Date prefix */
-            + ngx_sizeof_ssz("</td></tr>\n") /* Date suffix */
-            + 2 /* CR LF */
-            ;
+            + ngx_sizeof_ssz("</a></td>" CRLF)
+            + ngx_sizeof_ssz(TAB "<td class=\"size\">")
+            + 22 /* File size */
+            + ngx_sizeof_ssz("</td>" CRLF)
+            + ngx_sizeof_ssz(TAB "<td class=\"date\"></td>")
+            + ngx_sizeof_ssz("</tr>" CRLF);
     }
 
     if ((b = ngx_create_temp_buf(r->pool, len)) == NULL)
@@ -853,22 +869,23 @@ make_content_buf(
     if (r->uri.len > 1) {
         b->last = ngx_cpymem_ssz(b->last,
                                  "<tr>"
-                                 "<td><a href=\"../");
+                                 "<td class=\"name\"><a href=\"../");
         if (*sort_url_args) {
             b->last = ngx_cpymem(b->last,
                                  sort_url_args,
                                  ngx_sizeof_ssz("?C=N&amp;O=A"));
         }
         b->last = ngx_cpymem_ssz(b->last,
-                                 "\">Parent directory/</a></td>"
-                                 "<td>-</td>"
-                                 "<td>-</td>"
-                                 "</tr>");
+                                 "\">../</a></td>"
+                                 "<td></td>"
+                                 "<td></td>"
+                                 "</tr>" CRLF);
     }
 
     /* Entries for directories and files */
     for (i = 0; i < entries.nelts; i++) {
-        b->last = ngx_cpymem_ssz(b->last, "<tr><td><a href=\"");
+        b->last = ngx_cpymem_ssz(b->last, "<tr>" CRLF
+          TAB "<td class=\"name\"><a href=\"");
 
         if (entry[i].escape) {
             ngx_fancyindex_escape_uri(b->last,
@@ -895,25 +912,40 @@ make_content_buf(
 
         len = entry[i].utf_len;
 
-        if (entry[i].name.len - len) {
+        if (entry[i].name.len != entry[i].utf_len) {
             if (len > alcf->name_length) {
                 copy = alcf->name_length - 3 + 1;
             } else {
-                copy = alcf->name_length + 1;
+                copy = len;
             }
 
+            last = b->last;
             b->last = ngx_utf8_cpystrn(b->last, entry[i].name.data,
                                           copy, entry[i].name.len);
+            b->last = (u_char *) ngx_escape_html(last, entry[i].name.data,
+                                                 b->last - last);
             last = b->last;
 
         } else {
+            if (len > alcf->name_length) {
+                copy = alcf->name_length - 3 + 1;
+            } else {
+                copy = len;
+            }
+
+            b->last = (u_char *) ngx_escape_html(b->last,
+                                                 entry[i].name.data, copy);
+            last = b->last;
+          /*
             b->last = ngx_cpystrn(b->last, entry[i].name.data,
                                   alcf->name_length + 1);
             last = b->last - 3;
+          */
         }
 
         if (len > alcf->name_length) {
-            b->last = ngx_cpymem_ssz(last, "..&gt;</a></td><td>");
+            b->last = ngx_cpymem_ssz(last, "..&gt;</a></td>" CRLF
+              TAB "<td class=\"size\">");
 
         } else {
             if (entry[i].dir && alcf->name_length - len > 0) {
@@ -921,25 +953,26 @@ make_content_buf(
                 len++;
             }
 
-            b->last = ngx_cpymem_ssz(b->last, "</a></td><td>");
+            b->last = ngx_cpymem_ssz(b->last, "</a></td>" CRLF
+              TAB "<td class=\"size\">");
         }
 
         if (alcf->exact_size) {
             if (entry[i].dir) {
-                *b->last++ = '-';
+                // *b->last++ = '-';
             } else {
-                b->last = ngx_sprintf(b->last, "%19O", entry[i].size);
+                b->last = ngx_sprintf(b->last, "%O", entry[i].size);
             }
 
         } else {
             if (entry[i].dir) {
-                *b->last++ = '-';
+                // *b->last++ = '-';
             } else {
                 length = entry[i].size;
 
                 if (length > 1024 * 1024 * 1024 - 1) {
-                    size = (ngx_int_t) (length / (1024 * 1024 * 1024));
-                    if ((length % (1024 * 1024 * 1024))
+                    size = (ngx_int_t) (length * 100 / (1024 * 1024 * 1024));
+                    if ((length * 100 % (1024 * 1024 * 1024))
                                                 > (1024 * 1024 * 1024 / 2 - 1))
                     {
                         size++;
@@ -947,15 +980,15 @@ make_content_buf(
                     scale = 'G';
 
                 } else if (length > 1024 * 1024 - 1) {
-                    size = (ngx_int_t) (length / (1024 * 1024));
-                    if ((length % (1024 * 1024)) > (1024 * 1024 / 2 - 1)) {
+                    size = (ngx_int_t) (length * 100 / (1024 * 1024));
+                    if ((length * 100 % (1024 * 1024)) > (1024 * 1024 / 2 - 1)) {
                         size++;
                     }
                     scale = 'M';
 
                 } else if (length > 9999) {
-                    size = (ngx_int_t) (length / 1024);
-                    if (length % 1024 > 511) {
+                    size = (ngx_int_t) (length * 100 / 1024);
+                    if (length * 100 % 1024 > 511) {
                         size++;
                     }
                     scale = 'K';
@@ -966,21 +999,19 @@ make_content_buf(
                 }
 
                 if (scale) {
-                    b->last = ngx_sprintf(b->last, "%6i%c", size, scale);
+                    b->last = ngx_sprintf(b->last, "%i.%02d %cB", size / 100, size % 100, scale);
 
                 } else {
-                    b->last = ngx_sprintf(b->last, " %6i", size);
+                    b->last = ngx_sprintf(b->last, "%i B", size);
                 }
             }
         }
 
         ngx_gmtime(entry[i].mtime + tp->gmtoff * 60 * alcf->localtime, &tm);
-        b->last = ngx_cpymem_ssz(b->last, "</td><td>");
+        b->last = ngx_cpymem_ssz(b->last, "</td>" CRLF
+          TAB "<td class=\"date\">");
         b->last = ngx_fancyindex_timefmt(b->last, &alcf->time_format, &tm);
-        b->last = ngx_cpymem_ssz(b->last, "</td></tr>");
-
-        *b->last++ = CR;
-        *b->last++ = LF;
+        b->last = ngx_cpymem_ssz(b->last, "</td>" CRLF "</tr>");
     }
 
     /* Output table bottom */
@@ -1181,7 +1212,7 @@ ngx_http_fancyindex_cmp_entries_name_desc(const void *one, const void *two)
         return 1;
     }
 
-    return (int) ngx_strcmp(second->name.data, first->name.data);
+    return (int) ngx_filename_cmp(second->name.data, first->name.data, (size_t)-1);
 }
 
 
