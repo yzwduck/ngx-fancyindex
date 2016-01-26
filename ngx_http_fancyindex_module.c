@@ -700,10 +700,7 @@ make_content_buf(
         entry->dir     = ngx_de_is_dir(&dir);
         entry->mtime   = ngx_de_mtime(&dir);
         entry->size    = ngx_de_size(&dir);
-        entry->utf_len = (r->headers_out.charset.len == 5 &&
-                ngx_strncasecmp(r->headers_out.charset.data, (u_char*) "utf-8", 5) == 0)
-            ?  ngx_utf8_length(entry->name.data, entry->name.len)
-            : len;
+        entry->utf_len = ngx_utf8_length(entry->name.data, entry->name.len);
     }
 
     if (ngx_close_dir(&dir) == NGX_ERROR) {
@@ -910,7 +907,7 @@ make_content_buf(
         *b->last++ = '"';
         *b->last++ = '>';
 
-        len = entry[i].utf_len;
+        len = entry[i].name.len;
 
         if (entry[i].name.len != entry[i].utf_len) {
             if (len > alcf->name_length) {
@@ -921,7 +918,7 @@ make_content_buf(
 
             last = b->last;
             b->last = ngx_utf8_cpystrn(b->last, entry[i].name.data,
-                                          copy, entry[i].name.len);
+                                       (size_t)-1, copy);
             b->last = (u_char *) ngx_escape_html(last, entry[i].name.data,
                                                  b->last - last);
             last = b->last;
